@@ -1,0 +1,454 @@
+{
+  "name": "Phishing Detector",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "const email = $input.first().json;\nconst headers = email.headers;\n\nfunction extractHeaderValue(rawLine) {\n  if (!rawLine) return '';\n  const colonIndex = rawLine.indexOf(':');\n  return colonIndex !== -1 ? rawLine.substring(colonIndex + 1).trim() : '';\n}\n\nfunction extractEmailAddress(addressString) {\n  const match = addressString.match(/<([^>]+)>/);\n  if (match) return match[1].trim();\n  const bare = addressString.match(/[\\w.+-]+@[\\w.-]+/);\n  return bare ? bare[0] : addressString.trim();\n}\n\nconst from = extractHeaderValue(headers['from']);\nconst fromAddress = extractEmailAddress(from);\nconst subject = extractHeaderValue(headers['subject']);\nconst replyTo = extractHeaderValue(headers['reply-to']);\n\nfunction extractDomain(addressString) {\n  const match = addressString.match(/@([\\w.-]+)/);\n  return match ? match[1] : '';\n}\n\nconst fromDomain = extractDomain(from);\nconst replyToDomain = replyTo ? extractDomain(replyTo) : '';\nconst replyToMismatch = replyToDomain && replyToDomain !== fromDomain;\n\nconst authResults = headers['arc-authentication-results'] || headers['authentication-results'] || '';\nconst dkimPass = authResults.includes('dkim=pass');\nconst spfPass = authResults.includes('spf=pass');\nconst dmarcPass = authResults.includes('dmarc=pass');\n\n// --- Body text ---\nlet bodyText = email.text || email.html || email.snippet || '';\nbodyText = bodyText.replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim();\n\n// --- URLs ---\nconst urlRegex = /https?:\\/\\/[^\\s\"'<>]+/g;\nconst urls = bodyText.match(urlRegex) || [];\nconst linkDomains = urls.map(u => {\n  const m = u.match(/https?:\\/\\/([\\w.-]+)/);\n  return m ? m[1] : '';\n}).filter(Boolean);\nconst uniqueLinkDomains = [...new Set(linkDomains)];\n\n// ========== FEATURE 1: LOOKALIKE / BRAND IMPERSONATION ==========\nconst knownBrands = ['paypal', 'instagram', 'facebook', 'google', 'microsoft', 'apple', 'amazon', 'netflix', 'bca', 'mandiri', 'seabank', 'dana', 'gopay', 'ovo', 'shopee', 'tokopedia', 'linkedin', 'whatsapp'];\n\nconst legitDomains = [\n  'instagram.com', 'cdninstagram.com',\n  'facebook.com', 'fbcdn.net', 'fb.com',\n  'google.com', 'googleusercontent.com', 'gstatic.com', 'googleapis.com',\n  'microsoft.com', 'office.com', 'live.com', 'outlook.com',\n  'apple.com', 'icloud.com',\n  'amazon.com', 'amazonaws.com', 'media-amazon.com', 'ssl-images-amazon.com',\n  'netflix.com', 'nflxext.com',\n  'paypal.com', 'paypalobjects.com',\n  'linkedin.com', 'licdn.com',\n  'whatsapp.com', 'whatsapp.net',\n  'shopee.co.id', 'shopee.com',\n  'tokopedia.com', 'tokopedia.net',\n  'bca.co.id', 'klikbca.com',\n  'seabank.co.id', 'dana.id', 'gopay.co.id', 'ovo.id', 'mandiri.co.id'\n];\n\nfunction isLegitDomain(domain) {\n  const d = (domain || '').toLowerCase();\n  return legitDomains.some(legit => d === legit || d.endsWith('.' + legit));\n}\n\nfunction lookalikeCheck(domain) {\n  const d = (domain || '').toLowerCase();\n  if (isLegitDomain(d)) {\n    return { suspicious: false, impersonates: null };\n  }\n  for (const brand of knownBrands) {\n    if (d.includes(brand)) {\n      return { suspicious: true, impersonates: brand };\n    }\n  }\n  return { suspicious: false, impersonates: null };\n}\n\nconst senderCheck = lookalikeCheck(fromDomain);\nconst linkLookalikes = uniqueLinkDomains\n  .map(d => ({ domain: d, ...lookalikeCheck(d) }))\n  .filter(x => x.suspicious);\n\n// ========== FEATURE 2: STRUCTURAL URL RED FLAGS ==========\nconst shortenerDomains = ['bit.ly', 'tinyurl.com', 't.co', 'goo.gl', 's.id', 'tiny.cc'];\nconst hasShortener = uniqueLinkDomains.some(d => shortenerDomains.includes(d));\n\nconst hasIpUrl = urls.some(u => /https?:\\/\\/\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}/.test(u));\n\nconst credentialKeywords = ['login', 'verify', 'secure', 'account', 'password', 'signin', 'update-info', 'confirm'];\nconst credentialUrlHits = urls.filter(u =>\n  credentialKeywords.some(k => u.toLowerCase().includes(k))\n).length;\n\nconst riskyTlds = ['.xyz', '.top', '.tk', '.ml', '.icu', '.click', '.gq', '.cf'];\nconst hasRiskyTld = uniqueLinkDomains.some(d => riskyTlds.some(t => d.endsWith(t)));\n\n// ========== FEATURE 3: DISPLAY-NAME MISMATCH ==========\nconst displayName = from.split('<')[0].trim().toLowerCase();\nconst displayNameClaimsBrand = knownBrands.find(b => displayName.includes(b));\nconst displayNameMismatch = !!(displayNameClaimsBrand && !fromDomain.includes(displayNameClaimsBrand));\n\n// ========== FEATURE 4: URGENCY SCORING ==========\nconst urgencyWords = ['urgent', 'immediately', 'suspended', 'verify now', 'act now', 'expire', 'within 24 hours', 'account locked', 'confirm your'];\nconst bodyLower = bodyText.toLowerCase();\nconst urgencyHits = urgencyWords.filter(w => bodyLower.includes(w));\n\nreturn [{\n  json: {\n    from_address: fromAddress,\n    from_domain: fromDomain,\n    subject: subject,\n    reply_to_mismatch: replyToMismatch,\n    reply_to_domain: replyToDomain,\n    dkim_pass: dkimPass,\n    spf_pass: spfPass,\n    dmarc_pass: dmarcPass,\n    url_count: urls.length,\n    unique_link_domains: uniqueLinkDomains,\n    sender_impersonation: senderCheck,\n    link_impersonations: linkLookalikes,\n    has_url_shortener: hasShortener,\n    has_ip_url: hasIpUrl,\n    credential_url_hits: credentialUrlHits,\n    has_risky_tld: hasRiskyTld,\n    display_name_mismatch: displayNameMismatch,\n    urgency_keywords: urgencyHits,\n    body_snippet: bodyText.substring(0, 500)\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        416,
+        0
+      ],
+      "id": "807990dd-194a-4e8d-806e-3b45db3f76e0",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "includeSpamTrash": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        96,
+        0
+      ],
+      "id": "ef1a3935-e4f6-43b7-b915-eddc53f39afd",
+      "name": "Gmail Trigger",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "Xz56DZtLB9bF9U4o",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a phishing detection analyst. You receive extracted features from an email and must assess phishing risk. Reason over the COMBINATION of signals, never any single one in isolation.\n\nKey principles:\n1. Passing DKIM/SPF/DMARC proves the email is authentic to its sender domain. Attackers CAN register lookalike domains with valid auth, so auth passing alone does not guarantee safety — but combined with a well-known legitimate sender domain and matching link domains, it strongly indicates a real message.\n2. A high URL count is NORMAL for newsletters, notifications, and marketing email. It is NOT suspicious on its own. Only treat links as a red flag if the link domains are lookalikes, shorteners, IP addresses, or mismatch the sender.\n3. Legitimate personal mail sometimes fails auth — auth failure alone is weak evidence.\n4. The genuinely dangerous pattern is: a claimed trusted identity (bank, payment, login) COMBINED WITH lookalike/mismatched domains, auth failures, credential-harvesting links (/login, /verify), and pressure/urgency to act fast.\n5. The sender_impersonation and link_impersonations flags are heuristic hints, not proof. A flag can be a false positive (an unlisted-but-legitimate CDN or subdomain). Weigh it alongside auth results and domain consistency; if everything else indicates a known legitimate service, you may treat a lone impersonation flag as a false positive.\n\nBe conservative: if authentication passes AND the sender and link domains are consistent and belong to a recognized legitimate service, classify as \"legitimate\" even if the email contains many links. Reserve \"phishing\" and \"suspicious\" for genuine combinations of risk signals.\n\nRespond ONLY with valid JSON matching this exact schema (no markdown, no code fences):\n{\"verdict\": \"phishing\" | \"suspicious\" | \"legitimate\", \"confidence\": 0-100, \"red_flags\": [array of short strings], \"reasoning\": \"one or two sentences\"}\n\nWorked examples:\n\nExample A (legitimate): sender_impersonation.suspicious=false, all auth passes, many URLs but link domains match the sender's real domain, no credential URLs, no urgency. → {\"verdict\":\"legitimate\",\"confidence\":95,\"red_flags\":[],\"reasoning\":\"Authenticated message from a recognized service with consistent sender and link domains; high link count is normal for notifications.\"}\n\nExample B (phishing): sender_impersonation.suspicious=true impersonating a bank, OR display_name_mismatch=true, credential_url_hits>0, urgency present — even if auth passes. → {\"verdict\":\"phishing\",\"confidence\":90,\"red_flags\":[\"brand impersonation domain\",\"credential-harvesting link\",\"urgency pressure\"],\"reasoning\":\"Domain impersonates a trusted brand and pushes urgent credential entry — classic phishing regardless of authentication.\"}\n\nExample C (personal, auth fails): no impersonation, no credential links, no urgency, but auth fails. → {\"verdict\":\"legitimate\",\"confidence\":70,\"red_flags\":[\"authentication not verified\"],\"reasoning\":\"Likely a personal or small-sender email; auth failure alone is weak evidence without other risk signals.\"}"
+            },
+            {
+              "content": "={{ $json.toJsonString() }}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.3,
+      "position": [
+        624,
+        0
+      ],
+      "id": "ef86c286-b8cf-4dbc-bf5e-eb4781b9ad41",
+      "name": "Message a model",
+      "credentials": {
+        "openAiApi": {
+          "id": "Ssg5Pj5uvpDPkbkQ",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "let rawText = $input.first().json.output[0].content[0].text;\nrawText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();\nlet result;\ntry {\n  result = JSON.parse(rawText);\n} catch (e) {\n  result = { verdict: 'parse_error', confidence: 0, red_flags: ['Could not parse model output'], reasoning: rawText.substring(0, 200) };\n}\n// Pull sender/subject forward from the extraction node (2 nodes back)\nconst features = $('Code in JavaScript').first().json;\nreturn [{\n  json: {\n    timestamp: new Date().toISOString(),\n    from_address: features.from_address || '',\n    from_domain: features.from_domain || '',\n    subject: features.subject || '',\n    verdict: result.verdict,\n    confidence: result.confidence,\n    red_flags: Array.isArray(result.red_flags) ? result.red_flags.join(', ') : '',\n    reasoning: result.reasoning\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        992,
+        0
+      ],
+      "id": "a4ef13a7-1c16-4128-8a19-606c3091d99e",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1CIcBXCerj6OcSI6N9OgV-TE8N8wIRahKe83wk9XfiT8",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "All_Emails",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1CIcBXCerj6OcSI6N9OgV-TE8N8wIRahKe83wk9XfiT8/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "from_domain",
+              "displayName": "from_domain",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "subject",
+              "displayName": "subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confidence ",
+              "displayName": "confidence ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "red_flags ",
+              "displayName": "red_flags ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "reasoning",
+              "displayName": "reasoning",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1360,
+        0
+      ],
+      "id": "c29f0d3c-fa91-4f9c-9323-6b377fba50cb",
+      "name": "Log All Emails",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IT2310wuwB905J0m",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond1",
+              "leftValue": "={{ $json.verdict }}",
+              "rightValue": "legitimate",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1584,
+        0
+      ],
+      "id": "b7bbcfc8-3ba9-490b-84aa-1799db9a2e79",
+      "name": "Is Phishing?"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1CIcBXCerj6OcSI6N9OgV-TE8N8wIRahKe83wk9XfiT8",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 918303318,
+          "mode": "list",
+          "cachedResultName": "Phishing_Only",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1CIcBXCerj6OcSI6N9OgV-TE8N8wIRahKe83wk9XfiT8/edit#gid=918303318"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "from_domain",
+              "displayName": "from_domain",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "subject",
+              "displayName": "subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "red_flags",
+              "displayName": "red_flags",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "reasoning",
+              "displayName": "reasoning",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "verdict",
+              "displayName": "verdict",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1792,
+        -96
+      ],
+      "id": "742f8d3c-389c-470c-a2b7-2f0184b09265",
+      "name": "Log Phishing Only",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IT2310wuwB905J0m",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "6281239661",
+        "text": "=🚨 *PHISHING ALERT* 🚨\n━━━━━━━━━━━━━━━━\n\n{{ $json.verdict === 'phishing' ? '🔴' : '🟡' }} *{{ $json.verdict.toUpperCase() }}*  —  {{ $json.confidence }}% confidence\n\n📧 *From:*  `{{ $json.from_address }}`\n📝 *Subject:*  {{ $json.subject }}\n\n⚠️ *Red Flags:*\n{{ $json.red_flags.split(', ').map(f => '   • ' + f).join('\\n') }}\n\n🧠 *Analysis:*\n_{{ $json.reasoning }}_\n\n━━━━━━━━━━━━━━━━\n🕐 {{ new Date($json.timestamp).toLocaleString('en-GB', { timeZone: 'Asia/Jakarta' }) }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2016,
+        -112
+      ],
+      "id": "b3640aa7-2074-46dc-ae28-b421d2f9f54a",
+      "name": "Send a text message",
+      "webhookId": "118a561c-81ed-47b1-b0c8-8d1e1fb05621",
+      "credentials": {
+        "telegramApi": {
+          "id": "SM01I5EwKwBC3AGy",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Message a model",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message a model": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log All Emails": {
+      "main": [
+        [
+          {
+            "node": "Is Phishing?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Phishing?": {
+      "main": [
+        [
+          {
+            "node": "Log Phishing Only",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "Log All Emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Phishing Only": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "c0ccd4ea-bb2d-4adc-b5a1-88f46dbd0397",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "e05747d42d85dd23104b4a3e35f9d259b82d25f678e87dad86155f75d278e03b"
+  },
+  "nodeGroups": [],
+  "id": "pqL5PEPqpjJlA202",
+  "tags": []
+}
