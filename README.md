@@ -2,7 +2,7 @@
 
 An AI-powered phishing detection pipeline built in **n8n**. It extracts email signals deterministically in code, then uses an LLM to reason over the combination of signals — the same way a human SOC analyst weighs multiple weak indicators rather than trusting any single one. Verdicts are logged to Google Sheets and pushed to Telegram in real time.
 
-![Workflow architecture](docs/architecture.png)
+![Workflow architecture](docs/rchitecture.png)
 
 ## Why this design
 
