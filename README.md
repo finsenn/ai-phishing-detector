@@ -2,7 +2,7 @@
 
 An AI-powered phishing detection pipeline built in **n8n**. It extracts email signals deterministically in code, then uses an LLM to reason over the combination of signals — the same way a human SOC analyst weighs multiple weak indicators rather than trusting any single one. Verdicts are logged to Google Sheets and pushed to Telegram in real time.
 
-![Workflow architecture](docs/rchitecture.png)
+![Workflow architecture](docs/architecture.png)
 
 ## Why this design
 
@@ -34,7 +34,7 @@ See [docs/detection-signals.md](docs/detection-signals.md) for the full referenc
 
 | Telegram alert | Google Sheet log |
 |---|---|
-| ![Telegram alert](docs/telegram-alert.png) | ![Sheet log](docs/sheet-log.png) |
+| ![Telegram alert](docs/telegram-alert.jpeg) | ![Sheet log](docs/sheet-log.png) |
 
 ## Understanding email authentication (DKIM / SPF / DMARC)
 
